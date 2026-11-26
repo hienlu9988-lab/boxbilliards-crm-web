@@ -32,7 +32,7 @@ import {
 
 // ================= CẤU HÌNH SUPABASE (DÁN 2 MÃ CỦA BẠN VÀO ĐÂY) =================
 const SUPABASE_URL = 'https://glbmcafoxswychwpdcum.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdsYm1jYWZveHN3eWNod3BkY3VtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTU2NjQ2NTgsImV4cCI6MjExMTI0MDY1OH0.NawLJ2-HW4_y8wcWy_AKe4fkw9SSWdG_DyTGXG0dNPU';
+const SUPABASE_ANON_KEY = 'sb_publishable_S4WY4aZBbbc0ms4ewl-XYA_chWTPlIZ';
 // ================================================================================
 
 const isSupabaseConfigured =
