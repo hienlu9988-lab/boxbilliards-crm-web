@@ -27,7 +27,8 @@ import {
   Cloud,
   CloudOff,
   Download,
-  Upload
+  Upload,
+  Wallet
 } from 'lucide-react';
 
 // ================= CẤU HÌNH SUPABASE (DÁN 2 MÃ CỦA BẠN VÀO ĐÂY) =================
@@ -95,6 +96,26 @@ function sortByDateField(list, field, order) {
     const tB = parseDateTimestamp(b[field]);
     return order === 'asc' ? tA - tB : tB - tA;
   });
+}
+
+function getPAKDFinancials(pakd) {
+  if (!pakd) return { totalAmount: 0, paidAmount: 0, remainingDebt: 0, payments: [], status: 'Chưa thanh toán' };
+  const totalAmount = (pakd.items || []).reduce(
+    (sum, i) => sum + (Number(i.total_qty) || 0) * (Number(i.price) || 0),
+    0
+  );
+  const payments = Array.isArray(pakd.payments) ? pakd.payments : [];
+  const paidAmount = payments.reduce((sum, pay) => sum + (Number(pay.amount) || 0), 0);
+  const remainingDebt = totalAmount - paidAmount;
+
+  let status = 'Chưa thanh toán';
+  if (totalAmount > 0 && remainingDebt <= 0) {
+    status = 'Đã thanh toán đủ';
+  } else if (paidAmount > 0) {
+    status = 'Còn công nợ';
+  }
+
+  return { totalAmount, paidAmount, remainingDebt, payments, status };
 }
 
 function resolveItemBrand(item, products) {
@@ -306,6 +327,7 @@ export default function App() {
   const [soDateSort, setSoDateSort] = useState(null);
   const [pakdDetailSoDateSort, setPakdDetailSoDateSort] = useState(null);
   const [outboundDateSort, setOutboundDateSort] = useState(null);
+  const [debtFilter, setDebtFilter] = useState('all'); // 'all' | 'unpaid' | 'paid'
 
   const notify = (msg) => {
     setNotification(msg);
@@ -362,7 +384,6 @@ export default function App() {
             new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
           );
         } else {
-          // Lần đầu tiên chạy: đẩy dữ liệu hiện có trên máy lên Supabase để chia sẻ chung
           const initialPayload = {
             products,
             customers,
@@ -394,7 +415,6 @@ export default function App() {
 
     initCloudSync();
 
-    // Lắng nghe thay đổi từ các nhân viên khác theo thời gian thực
     const channel = supabase
       .channel('crm_store_realtime')
       .on(
@@ -587,6 +607,46 @@ export default function App() {
     }
   };
 
+  // --- QUẢN LÝ ĐỢT THANH TOÁN CHO PAKD ---
+  const handleSavePaymentForPAKD = (pakdId, paymentObj, isEditing) => {
+    const targetPAKD = pakds.find((p) => p.id === pakdId);
+    if (!targetPAKD) return;
+
+    saveCheckpoint(
+      isEditing
+        ? `Sửa đợt thanh toán (${targetPAKD.code})`
+        : `Thu tiền ${Number(paymentObj.amount).toLocaleString()}đ (${targetPAKD.code})`
+    );
+
+    const existingPayments = Array.isArray(targetPAKD.payments) ? targetPAKD.payments : [];
+    const updatedPayments = isEditing
+      ? existingPayments.map((pay) => (pay.id === paymentObj.id ? paymentObj : pay))
+      : [...existingPayments, paymentObj];
+
+    setPakds(
+      pakds.map((p) => (p.id === pakdId ? { ...p, payments: updatedPayments } : p))
+    );
+    setPaymentModalState(null);
+    notify(
+      isEditing
+        ? `Đã cập nhật đợt thanh toán cho ${targetPAKD.code}!`
+        : `Đã ghi nhận thanh toán ${Number(paymentObj.amount).toLocaleString()} đ cho ${targetPAKD.code}!`
+    );
+  };
+
+  const handleDeletePaymentFromPAKD = (pakdId, paymentId) => {
+    const targetPAKD = pakds.find((p) => p.id === pakdId);
+    if (!targetPAKD) return;
+    if (!window.confirm('Bạn có chắc muốn xóa đợt thanh toán này? Công nợ PAKD sẽ được tính lại.')) return;
+
+    saveCheckpoint(`Xóa đợt thanh toán (${targetPAKD.code})`);
+    const updatedPayments = (targetPAKD.payments || []).filter((pay) => pay.id !== paymentId);
+    setPakds(
+      pakds.map((p) => (p.id === pakdId ? { ...p, payments: updatedPayments } : p))
+    );
+    notify(`Đã xóa đợt thanh toán khỏi ${targetPAKD.code}!`);
+  };
+
   // Các hàm XÓA dữ liệu
   const handleDeleteCustomer = (id, name) => {
     if (window.confirm(`Xóa khách hàng ${name}? Việc này KHÔNG xóa các phiếu liên quan.`)) {
@@ -688,10 +748,31 @@ export default function App() {
     (sum, p) => sum + p.items.reduce((s, i) => s + Number(i.total_qty) * Number(i.price), 0),
     0
   );
+  const totalPaidAllPAKDs = pakds.reduce((sum, p) => sum + getPAKDFinancials(p).paidAmount, 0);
+  const totalRemainingDebtAllPAKDs = pakds.reduce(
+    (sum, p) => sum + Math.max(0, getPAKDFinancials(p).remainingDebt),
+    0
+  );
+
   const getCustomerTotalAmount = (customerId) =>
     pakds
       .filter((p) => p.customer_id === customerId)
       .reduce((sum, p) => sum + p.items.reduce((s, i) => s + Number(i.total_qty) * Number(i.price), 0), 0);
+
+  const getCustomerDebtStats = (customerId) => {
+    return pakds
+      .filter((p) => p.customer_id === customerId)
+      .reduce(
+        (acc, p) => {
+          const fin = getPAKDFinancials(p);
+          acc.total += fin.totalAmount;
+          acc.paid += fin.paidAmount;
+          acc.debt += Math.max(0, fin.remainingDebt);
+          return acc;
+        },
+        { total: 0, paid: 0, debt: 0 }
+      );
+  };
 
   const inboundSummary = goodsReceipts.reduce(
     (acc, grn) => {
@@ -722,6 +803,7 @@ export default function App() {
 
   const [showCreatePAKD, setShowCreatePAKD] = useState(false);
   const [editingPAKD, setEditingPAKD] = useState(null);
+  const [paymentModalState, setPaymentModalState] = useState(null); // { pakd, payment: null | obj }
 
   const [showCreateSO, setShowCreateSO] = useState(false);
   const [editingSO, setEditingSO] = useState(null);
@@ -746,6 +828,7 @@ export default function App() {
     { id: 'pakd_list', icon: Briefcase, label: '2. Phương án KD' },
     { id: 'sales_orders', icon: ShoppingCart, label: '3. Sales Orders' },
     { id: 'outbound', icon: ArrowUpFromLine, label: '4. Phiếu xuất kho' },
+    { id: 'debt_tracking', icon: Wallet, label: '5. Công nợ PAKD' },
     { id: 'customers', icon: Users, label: 'Khách hàng' },
     { id: 'inventory', icon: Package, label: 'Tồn kho thực tế' },
   ];
@@ -877,6 +960,7 @@ export default function App() {
       id: oldPAKD.id,
       customer_id: finalCustId,
       customer_name: trimmedCustName,
+      payments: Array.isArray(oldPAKD.payments) ? oldPAKD.payments : [],
     };
 
     const affectedSoCodes = salesOrders
@@ -1158,9 +1242,9 @@ export default function App() {
           <div className="p-8 overflow-y-auto space-y-6">
             <div>
               <h2 className="text-2xl font-bold text-white">Tổng quan Vận hành</h2>
-              <p className="text-neutral-400 text-sm mt-1">Theo dõi nhanh tiến độ Phương án kinh doanh và Kho vận</p>
+              <p className="text-neutral-400 text-sm mt-1">Theo dõi nhanh tiến độ Phương án kinh doanh, Công nợ và Kho vận</p>
             </div>
-            <div className="grid grid-cols-4 gap-5">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
               <div
                 className="bg-neutral-900 border border-neutral-800 p-5 rounded-xl cursor-pointer hover:border-orange-500/50 transition-colors"
                 onClick={() => setCurrentView('pakd_list')}
@@ -1172,7 +1256,23 @@ export default function App() {
                   <p className="text-3xl font-bold text-white">
                     {pakds.length} <span className="text-sm text-neutral-500 font-normal">PAKD</span>
                   </p>
-                  <p className="text-sm font-semibold text-emerald-400 mt-1">{totalPAKDAmount.toLocaleString()} VNĐ</p>
+                  <p className="text-sm font-semibold text-emerald-400 mt-1">{totalPAKDAmount.toLocaleString()} đ</p>
+                </div>
+              </div>
+              <div
+                className="bg-neutral-900 border border-neutral-800 p-5 rounded-xl cursor-pointer hover:border-orange-500/50 transition-colors"
+                onClick={() => setCurrentView('debt_tracking')}
+              >
+                <p className="text-neutral-400 text-xs uppercase font-semibold flex items-center justify-between">
+                  Công nợ phải thu <Wallet size={14} className="text-orange-400" />
+                </p>
+                <div className="mt-2">
+                  <p className="text-xl font-extrabold text-orange-400">
+                    {totalRemainingDebtAllPAKDs.toLocaleString()} đ
+                  </p>
+                  <p className="text-xs text-emerald-400 mt-1.5">
+                    Đã thu: {totalPaidAllPAKDs.toLocaleString()} đ
+                  </p>
                 </div>
               </div>
               <div
@@ -1367,6 +1467,7 @@ export default function App() {
                     <th className="p-4">Khách hàng</th>
                     <SortableDateHeader label="Ngày lập" sortOrder={pakdDateSort} onToggle={setPakdDateSort} />
                     <th className="p-4 text-right">Tổng giá trị (Incl.VAT)</th>
+                    <th className="p-4 text-right">Công nợ (Đã thu / Còn nợ)</th>
                     <th className="p-4 text-center">Tiến độ giao</th>
                     <th className="p-4 text-center">Thao tác</th>
                   </tr>
@@ -1375,7 +1476,7 @@ export default function App() {
                   {sortedPAKDs.length > 0 ? (
                     sortedPAKDs.map((p) => {
                       const totQty = p.items.reduce((s, i) => s + Number(i.total_qty), 0);
-                      const totAmount = p.items.reduce((s, i) => s + Number(i.total_qty) * Number(i.price), 0);
+                      const { totalAmount, paidAmount, remainingDebt } = getPAKDFinancials(p);
                       const doneQty = p.items.reduce((s, i) => s + getPAKDItemStats(p.id, i.sku).shipped, 0);
                       const pct = totQty > 0 ? Math.round((doneQty / totQty) * 100) : 0;
                       return (
@@ -1383,10 +1484,18 @@ export default function App() {
                           <td className="p-4 font-bold text-white">{p.code}</td>
                           <td className="p-4"><span className="font-semibold text-orange-400">{p.customer_name}</span></td>
                           <td className="p-4 text-neutral-300 font-medium">{p.date}</td>
-                          <td className="p-4 text-right font-semibold text-white">{totAmount.toLocaleString()} đ</td>
+                          <td className="p-4 text-right font-semibold text-white">{totalAmount.toLocaleString()} đ</td>
+                          <td className="p-4 text-right">
+                            <div className="text-xs">
+                              <span className="text-emerald-400 font-semibold">Thu: {paidAmount.toLocaleString()} đ</span>
+                              <span className={`block font-bold mt-0.5 ${remainingDebt > 0 ? 'text-orange-400' : 'text-neutral-500'}`}>
+                                {remainingDebt > 0 ? `Nợ: ${remainingDebt.toLocaleString()} đ` : 'Đã thu đủ'}
+                              </span>
+                            </div>
+                          </td>
                           <td className="p-4">
                             <div className="flex items-center justify-center gap-2">
-                              <div className="w-24 bg-neutral-800 rounded-full h-2">
+                              <div className="w-20 bg-neutral-800 rounded-full h-2">
                                 <div className={`h-2 rounded-full ${pct === 100 ? 'bg-emerald-500' : 'bg-orange-500'}`} style={{ width: `${pct}%` }} />
                               </div>
                               <span className="text-xs text-neutral-400 w-9">{pct}%</span>
@@ -1399,6 +1508,13 @@ export default function App() {
                                 className="bg-neutral-800 hover:bg-orange-600 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors"
                               >
                                 Mở chi tiết
+                              </button>
+                              <button
+                                onClick={() => setPaymentModalState({ pakd: p, payment: null })}
+                                title="Thêm đợt thanh toán nhanh"
+                                className="inline-flex items-center gap-1 bg-neutral-800 hover:bg-emerald-600 text-emerald-400 hover:text-white px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors"
+                              >
+                                <Wallet size={13} /> Thu tiền
                               </button>
                               <button
                                 onClick={() => setEditingPAKD(p)}
@@ -1421,7 +1537,7 @@ export default function App() {
                     })
                   ) : (
                     <tr>
-                      <td colSpan="6" className="p-8 text-center text-neutral-500 text-sm">
+                      <td colSpan="7" className="p-8 text-center text-neutral-500 text-sm">
                         Chưa có Phương án kinh doanh nào. Bấm <strong className="text-orange-400">+ TẠO PHƯƠNG ÁN MỚI</strong> để bắt đầu.
                       </td>
                     </tr>
@@ -1432,136 +1548,266 @@ export default function App() {
           </div>
         )}
 
-        {/* --- VIEW 3B: CHI TIẾT PHƯƠNG ÁN & TẠO SALES ORDER --- */}
-        {currentView === 'pakd_detail' && selectedPAKD && (
-          <div className="flex-1 flex flex-col overflow-hidden">
-            <div className="bg-neutral-900 border-b border-neutral-800 p-5 flex justify-between items-center shrink-0">
-              <div className="flex items-center gap-4">
-                <button onClick={() => setCurrentView('pakd_list')} className="p-2 bg-neutral-800 hover:bg-neutral-700 rounded-lg text-neutral-300"><ArrowLeft size={20} /></button>
-                <div>
-                  <h2 className="text-xl font-bold text-white">{selectedPAKD.code}</h2>
-                  <p className="text-xs text-neutral-400 mt-0.5">Khách hàng: <span className="text-orange-400 font-semibold">{selectedPAKD.customer_name}</span> • Ngày: {selectedPAKD.date}</p>
-                </div>
-              </div>
-              <div className="flex items-center gap-2.5">
-                <button
-                  onClick={() => setEditingPAKD(selectedPAKD)}
-                  className="px-4 py-2.5 rounded-lg text-sm font-semibold bg-neutral-800 hover:bg-amber-600 text-amber-400 hover:text-white transition-colors flex items-center gap-2"
-                >
-                  <Pencil size={15} /> Sửa PAKD
-                </button>
-                <button
-                  onClick={() => handleDeletePAKD(selectedPAKD.id, selectedPAKD.code)}
-                  className="px-4 py-2.5 rounded-lg text-sm font-semibold text-neutral-400 hover:bg-red-900/40 hover:text-red-400 border border-transparent hover:border-red-900 transition-colors flex items-center gap-2"
-                >
-                  <Trash2 size={15} /> Xóa PAKD
-                </button>
-                <button
-                  onClick={() => setShowCreateSO(true)}
-                  className="bg-orange-600 hover:bg-orange-700 text-white px-5 py-2.5 rounded-lg font-bold flex items-center gap-2 shadow-lg shadow-orange-950"
-                >
-                  <Plus size={18} /> TẠO SALES ORDER
-                </button>
-              </div>
-            </div>
-            <div className="p-6 overflow-y-auto space-y-6">
-              <div className="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
-                <div className="p-4 border-b border-neutral-800 font-bold text-white text-sm">Bảng theo dõi số lượng cam kết & tiến độ giao hàng</div>
-                <table className="w-full text-left border-collapse text-sm">
-                  <thead>
-                    <tr className="bg-black/60 border-b border-neutral-800 text-xs uppercase text-neutral-400">
-                      <th className="p-3.5">Mã SKU</th>
-                      <th className="p-3.5 w-1/3">Tên hàng hóa</th>
-                      <th className="p-3.5 text-right">Đơn giá (Incl.VAT)</th>
-                      <th className="p-3.5 text-center">Tổng cam kết</th>
-                      <th className="p-3.5 text-center text-yellow-400">Đã lên SO (Chờ xuất)</th>
-                      <th className="p-3.5 text-center text-emerald-400">Đã xuất kho</th>
-                      <th className="p-3.5 text-center text-orange-400">SL CÒN LẠI</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-neutral-800">
-                    {selectedPAKD.items.map((item, idx) => {
-                      const { shipped, pending } = getPAKDItemStats(selectedPAKD.id, item.sku);
-                      const remaining = item.total_qty - shipped - pending;
-                      return (
-                        <tr key={idx} className="hover:bg-neutral-800/40">
-                          <td className="p-3.5 font-mono font-semibold text-neutral-200">{item.sku}</td>
-                          <td className="p-3.5 text-neutral-300 leading-tight">{item.name}</td>
-                          <td className="p-3.5 text-right">{Number(item.price).toLocaleString()} đ</td>
-                          <td className="p-3.5 text-center font-bold text-white">{item.total_qty}</td>
-                          <td className="p-3.5 text-center text-yellow-400 font-semibold">{pending}</td>
-                          <td className="p-3.5 text-center text-emerald-400 font-semibold">{shipped}</td>
-                          <td className="p-3.5 text-center">
-                            <span className={`px-3 py-1 rounded font-bold ${remaining > 0 ? 'bg-orange-500/20 text-orange-400 border border-orange-500/40' : 'bg-neutral-800 text-neutral-500'}`}>{remaining}</span>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+        {/* --- VIEW 3B: CHI TIẾT PHƯƠNG ÁN & TẠO SALES ORDER + CÔNG NỢ --- */}
+        {currentView === 'pakd_detail' && selectedPAKD && (() => {
+          const fin = getPAKDFinancials(selectedPAKD);
+          const paidPct = fin.totalAmount > 0 ? Math.min(100, Math.round((fin.paidAmount / fin.totalAmount) * 100)) : 0;
 
-              <div>
-                <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-base font-bold text-white">Các đợt giao hàng (Sales Orders) thuộc PAKD này</h3>
+          return (
+            <div className="flex-1 flex flex-col overflow-hidden">
+              <div className="bg-neutral-900 border-b border-neutral-800 p-5 flex justify-between items-center shrink-0">
+                <div className="flex items-center gap-4">
+                  <button onClick={() => setCurrentView('pakd_list')} className="p-2 bg-neutral-800 hover:bg-neutral-700 rounded-lg text-neutral-300"><ArrowLeft size={20} /></button>
+                  <div>
+                    <h2 className="text-xl font-bold text-white">{selectedPAKD.code}</h2>
+                    <p className="text-xs text-neutral-400 mt-0.5">Khách hàng: <span className="text-orange-400 font-semibold">{selectedPAKD.customer_name}</span> • Ngày: {selectedPAKD.date}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2.5">
                   <button
-                    type="button"
-                    onClick={() => setPakdDetailSoDateSort((prev) => (prev === null ? 'asc' : prev === 'asc' ? 'desc' : null))}
-                    className="inline-flex items-center gap-1.5 text-xs bg-neutral-900 border border-neutral-700 hover:border-orange-500 px-3 py-1.5 rounded-lg text-neutral-300"
+                    onClick={() => setPaymentModalState({ pakd: selectedPAKD, payment: null })}
+                    className="px-4 py-2.5 rounded-lg text-sm font-bold bg-emerald-600 hover:bg-emerald-700 text-white transition-colors flex items-center gap-2 shadow-lg shadow-emerald-950"
                   >
-                    <ArrowUpDown size={13} className="text-orange-400" />
-                    <span>Sắp xếp ngày tạo: <strong className="text-orange-400">{pakdDetailSoDateSort === 'asc' ? 'Tăng dần' : pakdDetailSoDateSort === 'desc' ? 'Giảm dần' : 'Mặc định'}</strong></span>
+                    <Wallet size={16} /> Ghi nhận thanh toán
+                  </button>
+                  <button
+                    onClick={() => setEditingPAKD(selectedPAKD)}
+                    className="px-4 py-2.5 rounded-lg text-sm font-semibold bg-neutral-800 hover:bg-amber-600 text-amber-400 hover:text-white transition-colors flex items-center gap-2"
+                  >
+                    <Pencil size={15} /> Sửa PAKD
+                  </button>
+                  <button
+                    onClick={() => handleDeletePAKD(selectedPAKD.id, selectedPAKD.code)}
+                    className="px-4 py-2.5 rounded-lg text-sm font-semibold text-neutral-400 hover:bg-red-900/40 hover:text-red-400 border border-transparent hover:border-red-900 transition-colors flex items-center gap-2"
+                  >
+                    <Trash2 size={15} /> Xóa PAKD
+                  </button>
+                  <button
+                    onClick={() => setShowCreateSO(true)}
+                    className="bg-orange-600 hover:bg-orange-700 text-white px-5 py-2.5 rounded-lg font-bold flex items-center gap-2 shadow-lg shadow-orange-950"
+                  >
+                    <Plus size={18} /> TẠO SALES ORDER
                   </button>
                 </div>
-                {salesOrders.filter((so) => so.pakd_id === selectedPAKD.id).length > 0 ? (
-                  <div className="grid grid-cols-3 gap-4">
-                    {sortByDateField(salesOrders.filter((so) => so.pakd_id === selectedPAKD.id), 'order_date', pakdDetailSoDateSort).map((so) => {
-                      const totQty = so.items.reduce((s, i) => s + Number(i.qty), 0);
-                      const matchedGIN = goodsIssues.find((g) => g.so_code === so.so_code);
-                      return (
-                        <div key={so.id} className="bg-neutral-900 border border-neutral-800 border-l-4 border-l-orange-500 p-4 rounded-xl relative group">
-                          <div className="absolute top-3 right-3 flex items-center gap-1">
-                            <button
-                              onClick={() => setEditingSO(so)}
-                              title="Sửa Sales Order"
-                              className="text-neutral-400 hover:text-amber-400 p-1.5 bg-neutral-950 hover:bg-neutral-800 rounded transition-colors"
-                            >
-                              <Pencil size={13} />
-                            </button>
-                            {so.status !== 'Đã xuất kho' && (
+              </div>
+
+              <div className="p-6 overflow-y-auto space-y-6">
+                {/* KHỐI THEO DÕI CÔNG NỢ & CÁC ĐỢT THANH TOÁN */}
+                <div className="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden shadow-lg">
+                  <div className="p-4 border-b border-neutral-800 flex flex-wrap justify-between items-center gap-3 bg-black/40">
+                    <div className="flex items-center gap-2.5">
+                      <Wallet size={18} className="text-orange-500" />
+                      <span className="font-bold text-white text-sm">Theo dõi Công nợ & Các đợt thanh toán</span>
+                      <span
+                        className={`text-xs px-2.5 py-0.5 rounded-full font-semibold ${
+                          fin.status === 'Đã thanh toán đủ'
+                            ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                            : fin.status === 'Còn công nợ'
+                            ? 'bg-amber-950 text-amber-400 border border-amber-800'
+                            : 'bg-neutral-800 text-neutral-400 border border-neutral-700'
+                        }`}
+                      >
+                        {fin.status} ({paidPct}%)
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setPaymentModalState({ pakd: selectedPAKD, payment: null })}
+                      className="inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-1.5 rounded-lg text-xs font-bold transition-colors"
+                    >
+                      <Plus size={14} /> Thêm đợt thanh toán
+                    </button>
+                  </div>
+
+                  <div className="p-4 space-y-4">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      <div className="bg-black/60 border border-neutral-800 rounded-xl p-4">
+                        <p className="text-xs uppercase font-semibold text-neutral-400">Tổng giá trị PAKD (Incl.VAT)</p>
+                        <p className="text-2xl font-extrabold text-white mt-1">
+                          {fin.totalAmount.toLocaleString()} <span className="text-xs font-normal text-neutral-400">VNĐ</span>
+                        </p>
+                      </div>
+                      <div className="bg-black/60 border border-neutral-800 rounded-xl p-4">
+                        <p className="text-xs uppercase font-semibold text-neutral-400">Tổng đã thanh toán ({fin.payments.length} đợt)</p>
+                        <p className="text-2xl font-extrabold text-emerald-400 mt-1">
+                          {fin.paidAmount.toLocaleString()} <span className="text-xs font-normal text-neutral-400">VNĐ</span>
+                        </p>
+                      </div>
+                      <div className="bg-black/60 border border-neutral-800 rounded-xl p-4">
+                        <p className="text-xs uppercase font-semibold text-neutral-400">Công nợ còn lại phải thu</p>
+                        <p className={`text-2xl font-extrabold mt-1 ${fin.remainingDebt > 0 ? 'text-orange-400' : 'text-emerald-400'}`}>
+                          {fin.remainingDebt.toLocaleString()} <span className="text-xs font-normal text-neutral-400">VNĐ</span>
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="w-full bg-neutral-800 rounded-full h-2 overflow-hidden">
+                      <div
+                        className={`h-2 rounded-full transition-all ${paidPct >= 100 ? 'bg-emerald-500' : 'bg-orange-500'}`}
+                        style={{ width: `${paidPct}%` }}
+                      />
+                    </div>
+
+                    {fin.payments.length > 0 ? (
+                      <div className="border border-neutral-800 rounded-xl overflow-hidden">
+                        <table className="w-full text-left border-collapse text-sm">
+                          <thead>
+                            <tr className="bg-black/60 border-b border-neutral-800 text-xs uppercase text-neutral-400">
+                              <th className="p-3 text-center w-16">Đợt</th>
+                              <th className="p-3">Ngày thanh toán</th>
+                              <th className="p-3">Hình thức</th>
+                              <th className="p-3">Nội dung / Ghi chú</th>
+                              <th className="p-3 text-right">Số tiền thu (VNĐ)</th>
+                              <th className="p-3 text-center w-28">Thao tác</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-neutral-800">
+                            {fin.payments.map((pay, pIdx) => (
+                              <tr key={pay.id || pIdx} className="hover:bg-neutral-800/30">
+                                <td className="p-3 text-center font-bold text-orange-400">Đợt {pIdx + 1}</td>
+                                <td className="p-3 text-neutral-200 font-medium">{pay.date}</td>
+                                <td className="p-3">
+                                  <span className="text-xs px-2 py-0.5 rounded bg-neutral-800 text-neutral-300 border border-neutral-700">
+                                    {pay.method || 'Chuyển khoản'}
+                                  </span>
+                                </td>
+                                <td className="p-3 text-neutral-300">{pay.note || '—'}</td>
+                                <td className="p-3 text-right font-bold text-emerald-400">
+                                  {Number(pay.amount).toLocaleString()} đ
+                                </td>
+                                <td className="p-3 text-center">
+                                  <div className="flex justify-center items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => setPaymentModalState({ pakd: selectedPAKD, payment: pay })}
+                                      title="Sửa đợt thanh toán"
+                                      className="p-1.5 text-neutral-400 hover:text-amber-400 hover:bg-neutral-800 rounded-lg transition-colors"
+                                    >
+                                      <Pencil size={14} />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeletePaymentFromPAKD(selectedPAKD.id, pay.id)}
+                                      title="Xóa đợt thanh toán"
+                                      className="p-1.5 text-neutral-500 hover:text-red-400 hover:bg-red-950/50 rounded-lg transition-colors"
+                                    >
+                                      <Trash2 size={14} />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-neutral-500 text-center py-2">
+                        Chưa có đợt thanh toán nào được ghi nhận cho PAKD này. Bấm <strong className="text-emerald-400">+ Thêm đợt thanh toán</strong> để cập nhật.
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* BẢNG THEO DÕI SỐ LƯỢNG CAM KẾT & TIẾN ĐỘ GIAO HÀNG */}
+                <div className="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+                  <div className="p-4 border-b border-neutral-800 font-bold text-white text-sm">Bảng theo dõi số lượng cam kết & tiến độ giao hàng</div>
+                  <table className="w-full text-left border-collapse text-sm">
+                    <thead>
+                      <tr className="bg-black/60 border-b border-neutral-800 text-xs uppercase text-neutral-400">
+                        <th className="p-3.5">Mã SKU</th>
+                        <th className="p-3.5 w-1/3">Tên hàng hóa</th>
+                        <th className="p-3.5 text-right">Đơn giá (Incl.VAT)</th>
+                        <th className="p-3.5 text-center">Tổng cam kết</th>
+                        <th className="p-3.5 text-center text-yellow-400">Đã lên SO (Chờ xuất)</th>
+                        <th className="p-3.5 text-center text-emerald-400">Đã xuất kho</th>
+                        <th className="p-3.5 text-center text-orange-400">SL CÒN LẠI</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-neutral-800">
+                      {selectedPAKD.items.map((item, idx) => {
+                        const { shipped, pending } = getPAKDItemStats(selectedPAKD.id, item.sku);
+                        const remaining = item.total_qty - shipped - pending;
+                        return (
+                          <tr key={idx} className="hover:bg-neutral-800/40">
+                            <td className="p-3.5 font-mono font-semibold text-neutral-200">{item.sku}</td>
+                            <td className="p-3.5 text-neutral-300 leading-tight">{item.name}</td>
+                            <td className="p-3.5 text-right">{Number(item.price).toLocaleString()} đ</td>
+                            <td className="p-3.5 text-center font-bold text-white">{item.total_qty}</td>
+                            <td className="p-3.5 text-center text-yellow-400 font-semibold">{pending}</td>
+                            <td className="p-3.5 text-center text-emerald-400 font-semibold">{shipped}</td>
+                            <td className="p-3.5 text-center">
+                              <span className={`px-3 py-1 rounded font-bold ${remaining > 0 ? 'bg-orange-500/20 text-orange-400 border border-orange-500/40' : 'bg-neutral-800 text-neutral-500'}`}>{remaining}</span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* CÁC ĐỢT GIAO HÀNG (SALES ORDERS) */}
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-base font-bold text-white">Các đợt giao hàng (Sales Orders) thuộc PAKD này</h3>
+                    <button
+                      type="button"
+                      onClick={() => setPakdDetailSoDateSort((prev) => (prev === null ? 'asc' : prev === 'asc' ? 'desc' : null))}
+                      className="inline-flex items-center gap-1.5 text-xs bg-neutral-900 border border-neutral-700 hover:border-orange-500 px-3 py-1.5 rounded-lg text-neutral-300"
+                    >
+                      <ArrowUpDown size={13} className="text-orange-400" />
+                      <span>Sắp xếp ngày tạo: <strong className="text-orange-400">{pakdDetailSoDateSort === 'asc' ? 'Tăng dần' : pakdDetailSoDateSort === 'desc' ? 'Giảm dần' : 'Mặc định'}</strong></span>
+                    </button>
+                  </div>
+                  {salesOrders.filter((so) => so.pakd_id === selectedPAKD.id).length > 0 ? (
+                    <div className="grid grid-cols-3 gap-4">
+                      {sortByDateField(salesOrders.filter((so) => so.pakd_id === selectedPAKD.id), 'order_date', pakdDetailSoDateSort).map((so) => {
+                        const totQty = so.items.reduce((s, i) => s + Number(i.qty), 0);
+                        const matchedGIN = goodsIssues.find((g) => g.so_code === so.so_code);
+                        return (
+                          <div key={so.id} className="bg-neutral-900 border border-neutral-800 border-l-4 border-l-orange-500 p-4 rounded-xl relative group">
+                            <div className="absolute top-3 right-3 flex items-center gap-1">
                               <button
-                                onClick={() => handleDeleteSO(so.id, so.so_code)}
-                                title="Xóa Sales Order"
-                                className="text-neutral-500 hover:text-red-400 p-1.5 bg-neutral-950 hover:bg-neutral-800 rounded transition-colors"
+                                onClick={() => setEditingSO(so)}
+                                title="Sửa Sales Order"
+                                className="text-neutral-400 hover:text-amber-400 p-1.5 bg-neutral-950 hover:bg-neutral-800 rounded transition-colors"
                               >
-                                <Trash2 size={13} />
+                                <Pencil size={13} />
                               </button>
+                              {so.status !== 'Đã xuất kho' && (
+                                <button
+                                  onClick={() => handleDeleteSO(so.id, so.so_code)}
+                                  title="Xóa Sales Order"
+                                  className="text-neutral-500 hover:text-red-400 p-1.5 bg-neutral-950 hover:bg-neutral-800 rounded transition-colors"
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              )}
+                            </div>
+                            <div className="flex justify-between items-start mb-2 pr-14">
+                              <span className="font-bold text-white font-mono text-sm">{so.so_code}</span>
+                            </div>
+                            <div className="mb-2">
+                              <span className={`text-xs px-2 py-0.5 rounded font-semibold ${so.status === 'Đã xuất kho' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-yellow-950 text-yellow-400 border border-yellow-800'}`}>{so.status}</span>
+                            </div>
+                            <p className="text-xs text-neutral-400">Ngày tạo: {so.order_date} • Kho: {so.warehouse}</p>
+                            <p className="text-xs text-neutral-300 mt-1">Tổng số lượng đợt này: <strong className="text-orange-400">{totQty} SP</strong></p>
+                            {so.status !== 'Đã xuất kho' ? (
+                              <button onClick={() => setIssuingSO(so)} className="mt-3 w-full bg-orange-600 hover:bg-orange-700 text-white text-xs font-bold py-2 rounded-lg">Xuất kho cho SO này →</button>
+                            ) : (
+                              matchedGIN && <button onClick={() => setViewingGIN(matchedGIN)} className="mt-3 w-full bg-neutral-800 hover:bg-neutral-700 text-orange-400 text-xs font-semibold py-2 rounded-lg flex items-center justify-center gap-1.5"><Eye size={14} /> Xem phiếu xuất</button>
                             )}
                           </div>
-                          <div className="flex justify-between items-start mb-2 pr-14">
-                            <span className="font-bold text-white font-mono text-sm">{so.so_code}</span>
-                          </div>
-                          <div className="mb-2">
-                            <span className={`text-xs px-2 py-0.5 rounded font-semibold ${so.status === 'Đã xuất kho' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-yellow-950 text-yellow-400 border border-yellow-800'}`}>{so.status}</span>
-                          </div>
-                          <p className="text-xs text-neutral-400">Ngày tạo: {so.order_date} • Kho: {so.warehouse}</p>
-                          <p className="text-xs text-neutral-300 mt-1">Tổng số lượng đợt này: <strong className="text-orange-400">{totQty} SP</strong></p>
-                          {so.status !== 'Đã xuất kho' ? (
-                            <button onClick={() => setIssuingSO(so)} className="mt-3 w-full bg-orange-600 hover:bg-orange-700 text-white text-xs font-bold py-2 rounded-lg">Xuất kho cho SO này →</button>
-                          ) : (
-                            matchedGIN && <button onClick={() => setViewingGIN(matchedGIN)} className="mt-3 w-full bg-neutral-800 hover:bg-neutral-700 text-orange-400 text-xs font-semibold py-2 rounded-lg flex items-center justify-center gap-1.5"><Eye size={14} /> Xem phiếu xuất</button>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <p className="text-sm text-neutral-500">Chưa có đợt giao hàng (Sales Order) nào thuộc PAKD này.</p>
-                )}
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-neutral-500">Chưa có đợt giao hàng (Sales Order) nào thuộc PAKD này.</p>
+                  )}
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* --- VIEW 4: DANH SÁCH SALES ORDERS --- */}
         {currentView === 'sales_orders' && (
@@ -1707,6 +1953,152 @@ export default function App() {
           </div>
         )}
 
+        {/* --- VIEW 5B: QUẢN LÝ CÔNG NỢ PAKD --- */}
+        {currentView === 'debt_tracking' && (() => {
+          const filteredDebtPAKDs = sortedPAKDs.filter((p) => {
+            const { remainingDebt } = getPAKDFinancials(p);
+            if (debtFilter === 'unpaid') return remainingDebt > 0;
+            if (debtFilter === 'paid') return remainingDebt <= 0;
+            return true;
+          });
+
+          return (
+            <div className="p-8 overflow-y-auto space-y-6">
+              <div className="flex flex-wrap justify-between items-center gap-4">
+                <div>
+                  <h2 className="text-2xl font-bold text-white">Theo dõi Công nợ & Thanh toán PAKD</h2>
+                  <p className="text-neutral-400 text-sm mt-1">Tổng hợp công nợ khách hàng và lịch sử thanh toán từng đợt theo từng Phương án kinh doanh</p>
+                </div>
+
+                <div className="flex items-center gap-2 bg-neutral-900 p-1 rounded-xl border border-neutral-800">
+                  <button
+                    type="button"
+                    onClick={() => setDebtFilter('all')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                      debtFilter === 'all' ? 'bg-orange-600 text-white' : 'text-neutral-400 hover:text-white'
+                    }`}
+                  >
+                    Tất cả ({pakds.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDebtFilter('unpaid')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                      debtFilter === 'unpaid' ? 'bg-orange-600 text-white' : 'text-neutral-400 hover:text-white'
+                    }`}
+                  >
+                    Còn công nợ ({pakds.filter((p) => getPAKDFinancials(p).remainingDebt > 0).length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDebtFilter('paid')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                      debtFilter === 'paid' ? 'bg-emerald-600 text-white' : 'text-neutral-400 hover:text-white'
+                    }`}
+                  >
+                    Đã thu đủ ({pakds.filter((p) => getPAKDFinancials(p).remainingDebt <= 0).length})
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-5">
+                  <p className="text-xs uppercase font-semibold text-neutral-400">Tổng giá trị toàn bộ PAKD</p>
+                  <p className="text-2xl font-extrabold text-white mt-1.5">
+                    {totalPAKDAmount.toLocaleString()} <span className="text-xs font-normal text-neutral-400">VNĐ</span>
+                  </p>
+                </div>
+                <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-5">
+                  <p className="text-xs uppercase font-semibold text-neutral-400">Tổng tiền đã thu về</p>
+                  <p className="text-2xl font-extrabold text-emerald-400 mt-1.5">
+                    {totalPaidAllPAKDs.toLocaleString()} <span className="text-xs font-normal text-neutral-400">VNĐ</span>
+                  </p>
+                </div>
+                <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-5">
+                  <p className="text-xs uppercase font-semibold text-neutral-400">Tổng công nợ còn phải thu</p>
+                  <p className="text-2xl font-extrabold text-orange-400 mt-1.5">
+                    {totalRemainingDebtAllPAKDs.toLocaleString()} <span className="text-xs font-normal text-neutral-400">VNĐ</span>
+                  </p>
+                </div>
+              </div>
+
+              <div className="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden shadow-xl">
+                <table className="w-full text-left border-collapse text-sm">
+                  <thead>
+                    <tr className="bg-black/60 border-b border-neutral-800 text-xs uppercase text-neutral-400">
+                      <th className="p-4">Số PAKD</th>
+                      <th className="p-4">Khách hàng</th>
+                      <th className="p-4 text-right">Tổng giá trị PAKD</th>
+                      <th className="p-4 text-right">Đã thanh toán</th>
+                      <th className="p-4 text-right">Còn nợ phải thu</th>
+                      <th className="p-4 text-center">Trạng thái</th>
+                      <th className="p-4 text-center">Thao tác</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-neutral-800">
+                    {filteredDebtPAKDs.length > 0 ? (
+                      filteredDebtPAKDs.map((p) => {
+                        const fin = getPAKDFinancials(p);
+                        return (
+                          <tr key={p.id} className="hover:bg-neutral-800/40">
+                            <td className="p-4 font-bold text-white font-mono">{p.code}</td>
+                            <td className="p-4 font-semibold text-orange-400">{p.customer_name}</td>
+                            <td className="p-4 text-right font-semibold text-white">{fin.totalAmount.toLocaleString()} đ</td>
+                            <td className="p-4 text-right">
+                              <span className="font-bold text-emerald-400">{fin.paidAmount.toLocaleString()} đ</span>
+                              <span className="block text-[11px] text-neutral-500">({fin.payments.length} đợt)</span>
+                            </td>
+                            <td className="p-4 text-right font-extrabold text-orange-400">
+                              {fin.remainingDebt.toLocaleString()} đ
+                            </td>
+                            <td className="p-4 text-center">
+                              <span
+                                className={`text-xs px-2.5 py-1 rounded-full font-semibold ${
+                                  fin.status === 'Đã thanh toán đủ'
+                                    ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                                    : fin.status === 'Còn công nợ'
+                                    ? 'bg-amber-950 text-amber-400 border border-amber-800'
+                                    : 'bg-neutral-800 text-neutral-400 border border-neutral-700'
+                                }`}
+                              >
+                                {fin.status}
+                              </span>
+                            </td>
+                            <td className="p-4 text-center">
+                              <div className="flex justify-center items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => setPaymentModalState({ pakd: p, payment: null })}
+                                  className="inline-flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold transition-colors"
+                                >
+                                  <Plus size={13} /> Thu tiền
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => { setSelectedPAKDId(p.id); setCurrentView('pakd_detail'); }}
+                                  className="inline-flex items-center gap-1 bg-neutral-800 hover:bg-orange-600 text-white px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors"
+                                >
+                                  <Eye size={13} /> Chi tiết
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    ) : (
+                      <tr>
+                        <td colSpan="7" className="p-8 text-center text-neutral-500 text-sm">
+                          Không có Phương án kinh doanh nào trong nhóm lọc này.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          );
+        })()}
+
         {/* --- VIEW 6: KHÁCH HÀNG --- */}
         {currentView === 'customers' && (
           <div className="p-8 overflow-y-auto">
@@ -1721,26 +2113,33 @@ export default function App() {
                     <th className="p-4">Tên công ty / Pháp nhân</th>
                     <th className="p-4 text-center">Số PAKD đã lập</th>
                     <th className="p-4 text-right">Tổng mua hàng (VNĐ)</th>
+                    <th className="p-4 text-right">Đã thanh toán</th>
+                    <th className="p-4 text-right">Công nợ còn lại</th>
                     <th className="p-4 text-center">Thao tác</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-neutral-800">
                   {customers.length > 0 ? (
-                    customers.map((c) => (
-                      <tr key={c.id} className="hover:bg-neutral-800/40">
-                        <td className="p-4 font-mono font-bold text-orange-400">{c.id}</td>
-                        <td className="p-4 font-bold text-white">{c.name}</td>
-                        <td className="p-4 text-neutral-400">{c.company || '—'}</td>
-                        <td className="p-4 text-center font-bold">{c.total_pakd}</td>
-                        <td className="p-4 text-right font-semibold text-emerald-400">{getCustomerTotalAmount(c.id).toLocaleString()} đ</td>
-                        <td className="p-4 text-center">
-                          <button onClick={() => handleDeleteCustomer(c.id, c.name)} className="p-1.5 text-neutral-500 hover:bg-red-900/50 hover:text-red-400 rounded-lg"><Trash2 size={16} /></button>
-                        </td>
-                      </tr>
-                    ))
+                    customers.map((c) => {
+                      const debtStat = getCustomerDebtStats(c.id);
+                      return (
+                        <tr key={c.id} className="hover:bg-neutral-800/40">
+                          <td className="p-4 font-mono font-bold text-orange-400">{c.id}</td>
+                          <td className="p-4 font-bold text-white">{c.name}</td>
+                          <td className="p-4 text-neutral-400">{c.company || '—'}</td>
+                          <td className="p-4 text-center font-bold">{c.total_pakd}</td>
+                          <td className="p-4 text-right font-semibold text-white">{debtStat.total.toLocaleString()} đ</td>
+                          <td className="p-4 text-right font-semibold text-emerald-400">{debtStat.paid.toLocaleString()} đ</td>
+                          <td className="p-4 text-right font-bold text-orange-400">{debtStat.debt.toLocaleString()} đ</td>
+                          <td className="p-4 text-center">
+                            <button onClick={() => handleDeleteCustomer(c.id, c.name)} className="p-1.5 text-neutral-500 hover:bg-red-900/50 hover:text-red-400 rounded-lg"><Trash2 size={16} /></button>
+                          </td>
+                        </tr>
+                      );
+                    })
                   ) : (
                     <tr>
-                      <td colSpan="6" className="p-8 text-center text-neutral-500 text-sm">
+                      <td colSpan="8" className="p-8 text-center text-neutral-500 text-sm">
                         Chưa có khách hàng nào. Hệ thống sẽ tự động thêm khách hàng khi bạn tạo Phương án kinh doanh.
                       </td>
                     </tr>
@@ -1811,6 +2210,17 @@ export default function App() {
         )}
 
         {/* CÁC MODAL */}
+        {paymentModalState && (
+          <PaymentFormModal
+            pakd={paymentModalState.pakd}
+            initialPayment={paymentModalState.payment}
+            onClose={() => setPaymentModalState(null)}
+            onSave={(paymentObj, isEditing) =>
+              handleSavePaymentForPAKD(paymentModalState.pakd.id, paymentObj, isEditing)
+            }
+          />
+        )}
+
         {deletingProduct && (
           <DeleteProductWarningModal
             product={deletingProduct}
@@ -1832,24 +2242,32 @@ export default function App() {
                 <table className="w-full text-left border-collapse text-sm">
                   <thead>
                     <tr className="bg-black/60 border-b border-neutral-800 text-xs uppercase text-neutral-400">
-                      <th className="p-4 text-center w-16">Rank</th><th className="p-4">Khách hàng</th><th className="p-4 text-center">Số lượng PAKD</th><th className="p-4 text-right">Tổng doanh số (VNĐ)</th>
+                      <th className="p-4 text-center w-16">Rank</th>
+                      <th className="p-4">Khách hàng</th>
+                      <th className="p-4 text-center">Số lượng PAKD</th>
+                      <th className="p-4 text-right">Tổng doanh số (VNĐ)</th>
+                      <th className="p-4 text-right">Công nợ còn lại</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-neutral-800">
                     {customers.length > 0 ? (
                       [...customers]
                         .sort((a, b) => getCustomerTotalAmount(b.id) - getCustomerTotalAmount(a.id))
-                        .map((c, index) => (
-                          <tr key={c.id} className="hover:bg-neutral-800/40">
-                            <td className="p-4 text-center font-bold text-neutral-500">#{index + 1}</td>
-                            <td className="p-4"><span className="font-bold text-orange-400">{c.name}</span><span className="text-xs text-neutral-400 block">{c.id}</span></td>
-                            <td className="p-4 text-center font-bold text-white">{c.total_pakd}</td>
-                            <td className="p-4 text-right font-bold text-emerald-400">{getCustomerTotalAmount(c.id).toLocaleString()} đ</td>
-                          </tr>
-                        ))
+                        .map((c, index) => {
+                          const dStat = getCustomerDebtStats(c.id);
+                          return (
+                            <tr key={c.id} className="hover:bg-neutral-800/40">
+                              <td className="p-4 text-center font-bold text-neutral-500">#{index + 1}</td>
+                              <td className="p-4"><span className="font-bold text-orange-400">{c.name}</span><span className="text-xs text-neutral-400 block">{c.id}</span></td>
+                              <td className="p-4 text-center font-bold text-white">{c.total_pakd}</td>
+                              <td className="p-4 text-right font-bold text-emerald-400">{dStat.total.toLocaleString()} đ</td>
+                              <td className="p-4 text-right font-bold text-orange-400">{dStat.debt.toLocaleString()} đ</td>
+                            </tr>
+                          );
+                        })
                     ) : (
                       <tr>
-                        <td colSpan="4" className="p-8 text-center text-neutral-500 text-sm">
+                        <td colSpan="5" className="p-8 text-center text-neutral-500 text-sm">
                           Chưa có dữ liệu doanh số khách hàng.
                         </td>
                       </tr>
@@ -1901,7 +2319,7 @@ export default function App() {
                   notify(`Đã tự động thêm khách hàng mới: ${customerInfo.name.trim()}`);
                 }
                 setCustomers(updatedCustomers);
-                setPakds([{ ...pakdData, customer_id: custId }, ...pakds]);
+                setPakds([{ ...pakdData, customer_id: custId, payments: [] }, ...pakds]);
                 setShowCreatePAKD(false);
               }
             }}
@@ -2080,6 +2498,155 @@ export default function App() {
           />
         )}
       </main>
+    </div>
+  );
+}
+
+// --- MODAL THÊM / SỬA ĐỢT THANH TOÁN CHO PAKD ---
+function PaymentFormModal({ pakd, initialPayment, onClose, onSave }) {
+  const isEdit = Boolean(initialPayment);
+  const fin = getPAKDFinancials(pakd);
+  const currentEditingAmount = isEdit ? Number(initialPayment.amount) || 0 : 0;
+  const maxSuggestAmount = Math.max(0, fin.remainingDebt + currentEditingAmount);
+
+  const [date, setDate] = useState(initialPayment?.date || new Date().toLocaleDateString('vi-VN'));
+  const [amount, setAmount] = useState(
+    initialPayment?.amount !== undefined ? initialPayment.amount : maxSuggestAmount > 0 ? maxSuggestAmount : ''
+  );
+  const [method, setMethod] = useState(initialPayment?.method || 'Chuyển khoản');
+  const [note, setNote] = useState(
+    initialPayment?.note || (fin.payments.length === 0 && !isEdit ? 'Thanh toán đợt 1 / Đặt cọc' : '')
+  );
+
+  const handleSubmit = () => {
+    const numericAmount = Number(amount);
+    if (!numericAmount || numericAmount <= 0) {
+      return alert('Vui lòng nhập số tiền thanh toán lớn hơn 0!');
+    }
+
+    onSave(
+      {
+        id: initialPayment?.id || 'PAY-' + Date.now(),
+        date: date.trim() || new Date().toLocaleDateString('vi-VN'),
+        amount: numericAmount,
+        method,
+        note: note.trim(),
+      },
+      isEdit
+    );
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className="bg-neutral-900 border border-neutral-700 w-full max-w-lg rounded-2xl overflow-hidden shadow-2xl">
+        <div className="p-5 bg-black border-b border-neutral-800 flex justify-between items-center">
+          <div>
+            <h3 className="text-lg font-bold text-white">
+              {isEdit ? 'Chỉnh Sửa Đợt Thanh Toán' : 'Ghi Nhận Đợt Thanh Toán Mới'}
+            </h3>
+            <p className="text-xs text-neutral-400 mt-0.5">
+              PAKD: <strong className="text-orange-400 font-mono">{pakd.code}</strong> • KH: {pakd.customer_name}
+            </p>
+          </div>
+          <button onClick={onClose} className="text-neutral-400 hover:text-white text-2xl">
+            &times;
+          </button>
+        </div>
+
+        <div className="p-6 space-y-4 text-sm">
+          <div className="bg-black/50 border border-neutral-800 rounded-xl p-3.5 grid grid-cols-3 gap-2 text-xs">
+            <div>
+              <span className="text-neutral-400 block">Tổng PAKD</span>
+              <strong className="text-white text-sm">{fin.totalAmount.toLocaleString()} đ</strong>
+            </div>
+            <div>
+              <span className="text-neutral-400 block">Đã thu</span>
+              <strong className="text-emerald-400 text-sm">{fin.paidAmount.toLocaleString()} đ</strong>
+            </div>
+            <div>
+              <span className="text-neutral-400 block">Còn nợ</span>
+              <strong className="text-orange-400 text-sm">{fin.remainingDebt.toLocaleString()} đ</strong>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-neutral-400 mb-1">Ngày thanh toán</label>
+              <input
+                type="text"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                placeholder="DD/MM/YYYY"
+                className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3.5 py-2 text-white text-sm focus:border-orange-500 outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-neutral-400 mb-1">Hình thức thu tiền</label>
+              <select
+                value={method}
+                onChange={(e) => setMethod(e.target.value)}
+                className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3.5 py-2 text-white text-sm focus:border-orange-500 outline-none"
+              >
+                <option value="Chuyển khoản">Chuyển khoản</option>
+                <option value="Tiền mặt">Tiền mặt</option>
+                <option value="Khác">Khác</option>
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <div className="flex justify-between items-center mb-1">
+              <label className="text-xs font-bold text-emerald-400">Số tiền thanh toán đợt này (VNĐ) *</label>
+              {maxSuggestAmount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setAmount(maxSuggestAmount)}
+                  className="text-[11px] text-orange-400 hover:underline font-medium"
+                >
+                  Điền đủ số còn nợ ({maxSuggestAmount.toLocaleString()} đ)
+                </button>
+              )}
+            </div>
+            <input
+              type="number"
+              min="1"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              placeholder="Nhập số tiền VNĐ..."
+              className="w-full bg-neutral-950 border border-emerald-500/60 rounded-lg px-3.5 py-2.5 text-emerald-400 font-extrabold text-base focus:border-emerald-400 outline-none"
+              autoFocus
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-neutral-400 mb-1">Nội dung / Ghi chú đợt thanh toán</label>
+            <input
+              type="text"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="VD: Đặt cọc 30%, Thanh toán đợt 2 trước giao hàng..."
+              className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-3.5 py-2 text-white text-sm focus:border-orange-500 outline-none"
+            />
+          </div>
+        </div>
+
+        <div className="p-4 bg-black border-t border-neutral-800 flex justify-end gap-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-4 py-2 text-sm text-neutral-400 hover:text-white"
+          >
+            Hủy
+          </button>
+          <button
+            type="button"
+            onClick={handleSubmit}
+            className="bg-emerald-600 hover:bg-emerald-700 text-white px-6 py-2 rounded-lg text-sm font-bold shadow-lg shadow-emerald-950"
+          >
+            {isEdit ? 'CẬP NHẬT ĐỢT THANH TOÁN' : 'LƯU THANH TOÁN'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
