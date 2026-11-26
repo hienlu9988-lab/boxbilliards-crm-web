@@ -31,8 +31,8 @@ import {
 } from 'lucide-react';
 
 // ================= CẤU HÌNH SUPABASE (DÁN 2 MÃ CỦA BẠN VÀO ĐÂY) =================
-const SUPABASE_URL = https://glbmcafoxswychwpdcum.supabase.co/rest/v1/;
-const SUPABASE_ANON_KEY = sb_publishable_S4WY4aZBbbc0ms4ewl-XYA_chWTPlIZ;
+const SUPABASE_URL = 'https://glbmcafoxswychwpdcum.supabase.co/rest/v1/';
+const SUPABASE_ANON_KEY = 'sb_publishable_S4WY4aZBbbc0ms4ewl-XYA_chWTPlIZ';
 // ================================================================================
 
 const isSupabaseConfigured =
