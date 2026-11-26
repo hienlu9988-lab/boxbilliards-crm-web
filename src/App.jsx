@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { createClient } from '@supabase/supabase-js';
 import {
   Plus,
   ArrowLeft,
@@ -23,12 +24,26 @@ import {
   ArrowUpDown,
   Sparkles,
   Pencil,
-  HardDrive,
+  Cloud,
+  CloudOff,
   Download,
   Upload
 } from 'lucide-react';
 
-// --- KHỞI TẠO HỆ THỐNG TRỐNG (KHÔNG DỮ LIỆU MẪU) ---
+// ================= CẤU HÌNH SUPABASE (DÁN 2 MÃ CỦA BẠN VÀO ĐÂY) =================
+const SUPABASE_URL = 'https://glbmcafoxswychwpdcum.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdsYm1jYWZveHN3eWNod3BkY3VtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTU2NjQ2NTgsImV4cCI6MjExMTI0MDY1OH0.NawLJ2-HW4_y8wcWy_AKe4fkw9SSWdG_DyTGXG0dNPU';
+// ================================================================================
+
+const isSupabaseConfigured =
+  SUPABASE_URL.startsWith('http') && SUPABASE_ANON_KEY.length > 20;
+const supabase = isSupabaseConfigured
+  ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  : null;
+
+const CRM_RECORD_ID = 'boxbilliards_main';
+
+// --- KHỞI TẠO HỆ THỐNG TRỐNG ---
 const emptyProducts = [];
 const emptyCustomers = [];
 const emptyPAKDs = [];
@@ -269,7 +284,6 @@ export default function App() {
   const [selectedPAKDId, setSelectedPAKDId] = useState(null);
   const [notification, setNotification] = useState(null);
 
-  // Giữ nguyên key lưu trữ để không mất dữ liệu đã input ở bản trước
   const [products, setProducts] = useLocalStorage('bb_clean_products', emptyProducts);
   const [customers, setCustomers] = useLocalStorage('bb_clean_customers', emptyCustomers);
   const [pakds, setPakds] = useLocalStorage('bb_clean_pakds', emptyPAKDs);
@@ -279,10 +293,12 @@ export default function App() {
 
   const [history, setHistory] = useLocalStorage('bb_clean_history', []);
 
-  // Trạng thái đồng bộ file cứng crm-data.json trên ổ cứng
+  // Trạng thái đồng bộ đám mây Supabase
   const [isHydrated, setIsHydrated] = useState(false);
-  const [diskSaveStatus, setDiskSaveStatus] = useState('loading');
-  const [lastDiskSaveTime, setLastDiskSaveTime] = useState('');
+  const [cloudStatus, setCloudStatus] = useState(isSupabaseConfigured ? 'loading' : 'offline');
+  const [lastSyncTime, setLastSyncTime] = useState('');
+  const isRemoteApplyingRef = useRef(false);
+  const lastAppliedJsonRef = useRef('');
   const importFileInputRef = useRef(null);
 
   const [inboundDateSort, setInboundDateSort] = useState(null);
@@ -296,28 +312,57 @@ export default function App() {
     setTimeout(() => setNotification(null), 3500);
   };
 
-  // 1. Khi mở lại localhost: Tự động nạp dữ liệu từ file crm-data.json trên ổ cứng
-  useEffect(() => {
-    let cancelled = false;
-    async function loadFromDisk() {
-      try {
-        const res = await fetch('/api/crm-data');
-        if (!res.ok) throw new Error('API unavailable');
-        const result = await res.json();
-        if (cancelled) return;
+  const applyRemotePayload = (data) => {
+    if (!data || typeof data !== 'object') return;
+    isRemoteApplyingRef.current = true;
+    if (Array.isArray(data.products)) setProducts(data.products);
+    if (Array.isArray(data.customers)) setCustomers(data.customers);
+    if (Array.isArray(data.pakds)) setPakds(data.pakds);
+    if (Array.isArray(data.salesOrders)) setSalesOrders(data.salesOrders);
+    if (Array.isArray(data.goodsReceipts)) setGoodsReceipts(data.goodsReceipts);
+    if (Array.isArray(data.goodsIssues)) setGoodsIssues(data.goodsIssues);
+    lastAppliedJsonRef.current = JSON.stringify({
+      products: data.products || [],
+      customers: data.customers || [],
+      pakds: data.pakds || [],
+      salesOrders: data.salesOrders || [],
+      goodsReceipts: data.goodsReceipts || [],
+      goodsIssues: data.goodsIssues || [],
+    });
+    setTimeout(() => {
+      isRemoteApplyingRef.current = false;
+    }, 300);
+  };
 
-        if (result.exists && result.data) {
-          if (Array.isArray(result.data.products)) setProducts(result.data.products);
-          if (Array.isArray(result.data.customers)) setCustomers(result.data.customers);
-          if (Array.isArray(result.data.pakds)) setPakds(result.data.pakds);
-          if (Array.isArray(result.data.salesOrders)) setSalesOrders(result.data.salesOrders);
-          if (Array.isArray(result.data.goodsReceipts)) setGoodsReceipts(result.data.goodsReceipts);
-          if (Array.isArray(result.data.goodsIssues)) setGoodsIssues(result.data.goodsIssues);
-          setDiskSaveStatus('saved');
-          setLastDiskSaveTime(
+  // 1. Nạp dữ liệu từ Supabase khi mở web + Lắng nghe cập nhật thời gian thực từ các máy khác
+  useEffect(() => {
+    if (!supabase) {
+      setIsHydrated(true);
+      setCloudStatus('offline');
+      return;
+    }
+
+    let cancelled = false;
+
+    async function initCloudSync() {
+      try {
+        const { data: row, error } = await supabase
+          .from('crm_store')
+          .select('data')
+          .eq('id', CRM_RECORD_ID)
+          .maybeSingle();
+
+        if (cancelled) return;
+        if (error) throw error;
+
+        if (row && row.data) {
+          applyRemotePayload(row.data);
+          setCloudStatus('synced');
+          setLastSyncTime(
             new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
           );
         } else {
+          // Lần đầu tiên chạy: đẩy dữ liệu hiện có trên máy lên Supabase để chia sẻ chung
           const initialPayload = {
             products,
             customers,
@@ -325,69 +370,100 @@ export default function App() {
             salesOrders,
             goodsReceipts,
             goodsIssues,
-            updatedAt: new Date().toISOString(),
           };
-          const saveRes = await fetch('/api/crm-data', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(initialPayload),
+          lastAppliedJsonRef.current = JSON.stringify(initialPayload);
+          const { error: upsertErr } = await supabase.from('crm_store').upsert({
+            id: CRM_RECORD_ID,
+            data: initialPayload,
+            updated_at: new Date().toISOString(),
           });
           if (!cancelled) {
-            if (saveRes.ok) {
-              setDiskSaveStatus('saved');
-              setLastDiskSaveTime(
-                new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-              );
-            } else {
-              setDiskSaveStatus('local-only');
-            }
+            setCloudStatus(upsertErr ? 'error' : 'synced');
+            setLastSyncTime(
+              new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+            );
           }
         }
-      } catch {
-        if (!cancelled) setDiskSaveStatus('local-only');
+      } catch (err) {
+        console.error('Supabase init error:', err);
+        if (!cancelled) setCloudStatus('error');
       } finally {
         if (!cancelled) setIsHydrated(true);
       }
     }
-    loadFromDisk();
+
+    initCloudSync();
+
+    // Lắng nghe thay đổi từ các nhân viên khác theo thời gian thực
+    const channel = supabase
+      .channel('crm_store_realtime')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'crm_store', filter: `id=eq.${CRM_RECORD_ID}` },
+        (payload) => {
+          if (payload.new && payload.new.data) {
+            const incomingStr = JSON.stringify({
+              products: payload.new.data.products || [],
+              customers: payload.new.data.customers || [],
+              pakds: payload.new.data.pakds || [],
+              salesOrders: payload.new.data.salesOrders || [],
+              goodsReceipts: payload.new.data.goodsReceipts || [],
+              goodsIssues: payload.new.data.goodsIssues || [],
+            });
+            if (incomingStr !== lastAppliedJsonRef.current) {
+              applyRemotePayload(payload.new.data);
+              setCloudStatus('synced');
+              setLastSyncTime(
+                new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+              );
+              notify('Dữ liệu vừa được đồng bộ tự động từ đồng nghiệp!');
+            }
+          }
+        }
+      )
+      .subscribe();
+
     return () => {
       cancelled = true;
+      supabase.removeChannel(channel);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 2. Tự động ghi ra file crm-data.json mỗi khi có bất kỳ thay đổi dữ liệu nào
+  // 2. Tự động đẩy dữ liệu lên Supabase mỗi khi bạn thêm / sửa / xóa trên web
   useEffect(() => {
-    if (!isHydrated) return;
+    if (!isHydrated || !supabase || isRemoteApplyingRef.current) return;
 
-    setDiskSaveStatus('saving');
+    const currentSnapshotObj = {
+      products,
+      customers,
+      pakds,
+      salesOrders,
+      goodsReceipts,
+      goodsIssues,
+    };
+    const currentJson = JSON.stringify(currentSnapshotObj);
+    if (currentJson === lastAppliedJsonRef.current) return;
+
+    setCloudStatus('saving');
     const timer = setTimeout(async () => {
       try {
-        const res = await fetch('/api/crm-data', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            products,
-            customers,
-            pakds,
-            salesOrders,
-            goodsReceipts,
-            goodsIssues,
-            updatedAt: new Date().toISOString(),
-          }),
+        lastAppliedJsonRef.current = currentJson;
+        const { error } = await supabase.from('crm_store').upsert({
+          id: CRM_RECORD_ID,
+          data: currentSnapshotObj,
+          updated_at: new Date().toISOString(),
         });
-        if (res.ok) {
-          setDiskSaveStatus('saved');
-          setLastDiskSaveTime(
-            new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-          );
-        } else {
-          setDiskSaveStatus('local-only');
-        }
-      } catch {
-        setDiskSaveStatus('local-only');
+        if (error) throw error;
+        setCloudStatus('synced');
+        setLastSyncTime(
+          new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        );
+      } catch (err) {
+        console.error('Supabase sync error:', err);
+        setCloudStatus('error');
       }
-    }, 250);
+    }, 300);
 
     return () => clearTimeout(timer);
   }, [isHydrated, products, customers, pakds, salesOrders, goodsReceipts, goodsIssues]);
@@ -430,7 +506,7 @@ export default function App() {
         if (Array.isArray(parsed.salesOrders)) setSalesOrders(parsed.salesOrders);
         if (Array.isArray(parsed.goodsReceipts)) setGoodsReceipts(parsed.goodsReceipts);
         if (Array.isArray(parsed.goodsIssues)) setGoodsIssues(parsed.goodsIssues);
-        notify('Đã khôi phục dữ liệu từ file sao lưu thành công!');
+        notify('Đã nạp dữ liệu từ file sao lưu & đồng bộ lên Cloud thành công!');
       } catch {
         alert('File sao lưu không đúng định dạng JSON của hệ thống!');
       } finally {
@@ -644,7 +720,6 @@ export default function App() {
   const sortedSalesOrders = sortByDateField(salesOrders, 'order_date', soDateSort);
   const sortedGoodsIssues = sortByDateField(goodsIssues, 'date', outboundDateSort);
 
-  // State các Modal Tạo / Xem / Sửa / Xóa
   const [showCreatePAKD, setShowCreatePAKD] = useState(false);
   const [editingPAKD, setEditingPAKD] = useState(null);
 
@@ -1019,19 +1094,29 @@ export default function App() {
       <main className="flex-1 relative overflow-hidden flex flex-col bg-neutral-950">
         <div className="bg-black/80 border-b border-neutral-800 px-6 py-2.5 flex items-center justify-between shrink-0 gap-4">
           <div className="flex items-center gap-4 text-xs text-neutral-400">
-            {diskSaveStatus === 'saved' && (
+            {cloudStatus === 'synced' && (
               <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-emerald-950/60 border border-emerald-800/60 text-emerald-400 font-medium">
-                <HardDrive size={13} /> Đã tự động lưu vào file cứng (crm-data.json • {lastDiskSaveTime})
+                <Cloud size={13} /> Đã đồng bộ Cloud dùng chung (Supabase • {lastSyncTime})
               </span>
             )}
-            {diskSaveStatus === 'saving' && (
+            {cloudStatus === 'saving' && (
               <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-950/60 border border-amber-800/60 text-amber-300 font-medium">
-                <HardDrive size={13} /> Đang lưu dữ liệu...
+                <Cloud size={13} /> Đang đồng bộ lên Cloud...
               </span>
             )}
-            {diskSaveStatus === 'local-only' && (
+            {cloudStatus === 'loading' && (
               <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-neutral-900 border border-neutral-700 text-neutral-300">
-                <HardDrive size={13} className="text-orange-400" /> Đã lưu trên trình duyệt
+                <Cloud size={13} className="text-orange-400" /> Đang tải dữ liệu chung...
+              </span>
+            )}
+            {cloudStatus === 'error' && (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-red-950/60 border border-red-800/60 text-red-400 font-medium">
+                <CloudOff size={13} /> Lỗi kết nối Supabase (Kiểm tra lại URL/Key hoặc bảng crm_store)
+              </span>
+            )}
+            {cloudStatus === 'offline' && (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-neutral-900 border border-neutral-700 text-neutral-300">
+                <CloudOff size={13} className="text-orange-400" /> Chưa gắn Supabase (Đang lưu trên trình duyệt)
               </span>
             )}
 
@@ -1776,7 +1861,6 @@ export default function App() {
           </div>
         )}
 
-        {/* TẠO / SỬA PHƯƠNG ÁN KINH DOANH */}
         {(showCreatePAKD || editingPAKD) && (
           <PAKDFormModal
             initialPAKD={editingPAKD}
@@ -1824,7 +1908,6 @@ export default function App() {
           />
         )}
 
-        {/* TẠO / SỬA SALES ORDER */}
         {(showCreateSO || editingSO) && (
           <SOFormModal
             initialSO={editingSO}
@@ -1856,7 +1939,6 @@ export default function App() {
           />
         )}
 
-        {/* TẠO / SỬA PHIẾU NHẬP KHO */}
         {(showCreateGRN || editingGRN) && (
           <GRNFormModal
             initialGRN={editingGRN}
@@ -1943,7 +2025,6 @@ export default function App() {
           />
         )}
 
-        {/* LẬP PHIẾU XUẤT KHO TỪ SO */}
         {issuingSO && (
           <CreateGINModal
             so={issuingSO}
@@ -1966,7 +2047,6 @@ export default function App() {
           />
         )}
 
-        {/* SỬA PHIẾU XUẤT KHO */}
         {editingGIN && (
           <EditGINModal
             gin={editingGIN}
