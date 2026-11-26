@@ -98,35 +98,12 @@ function sortByDateField(list, field, order) {
   });
 }
 
-// Tính doanh thu, giá vốn (lấy trực tiếp từ giá vốn tự nhập trên PAKD) & lợi nhuận gộp
 function getPAKDFinancials(pakd) {
-  if (!pakd) {
-    return {
-      totalAmount: 0,
-      totalCost: 0,
-      grossProfit: 0,
-      grossMargin: 0,
-      paidAmount: 0,
-      remainingDebt: 0,
-      payments: [],
-      status: 'Chưa thanh toán',
-    };
-  }
-
-  let totalAmount = 0;
-  let totalCost = 0;
-
-  (pakd.items || []).forEach((i) => {
-    const qty = Number(i.total_qty) || 0;
-    const price = Number(i.price) || 0;
-    const unitCost = Number(i.cost) || 0;
-    totalAmount += qty * price;
-    totalCost += qty * unitCost;
-  });
-
-  const grossProfit = totalAmount - totalCost;
-  const grossMargin = totalAmount > 0 ? Math.round((grossProfit / totalAmount) * 1000) / 10 : 0;
-
+  if (!pakd) return { totalAmount: 0, paidAmount: 0, remainingDebt: 0, payments: [], status: 'Chưa thanh toán' };
+  const totalAmount = (pakd.items || []).reduce(
+    (sum, i) => sum + (Number(i.total_qty) || 0) * (Number(i.price) || 0),
+    0
+  );
   const payments = Array.isArray(pakd.payments) ? pakd.payments : [];
   const paidAmount = payments.reduce((sum, pay) => sum + (Number(pay.amount) || 0), 0);
   const remainingDebt = totalAmount - paidAmount;
@@ -138,16 +115,7 @@ function getPAKDFinancials(pakd) {
     status = 'Còn công nợ';
   }
 
-  return {
-    totalAmount,
-    totalCost,
-    grossProfit,
-    grossMargin,
-    paidAmount,
-    remainingDebt,
-    payments,
-    status,
-  };
+  return { totalAmount, paidAmount, remainingDebt, payments, status };
 }
 
 function resolveItemBrand(item, products) {
@@ -776,8 +744,10 @@ export default function App() {
     return { shipped, pending };
   };
 
-  const totalPAKDAmount = pakds.reduce((sum, p) => sum + getPAKDFinancials(p).totalAmount, 0);
-  const totalPAKDGrossProfit = pakds.reduce((sum, p) => sum + getPAKDFinancials(p).grossProfit, 0);
+  const totalPAKDAmount = pakds.reduce(
+    (sum, p) => sum + p.items.reduce((s, i) => s + Number(i.total_qty) * Number(i.price), 0),
+    0
+  );
   const totalPaidAllPAKDs = pakds.reduce((sum, p) => sum + getPAKDFinancials(p).paidAmount, 0);
   const totalRemainingDebtAllPAKDs = pakds.reduce(
     (sum, p) => sum + Math.max(0, getPAKDFinancials(p).remainingDebt),
@@ -787,7 +757,7 @@ export default function App() {
   const getCustomerTotalAmount = (customerId) =>
     pakds
       .filter((p) => p.customer_id === customerId)
-      .reduce((sum, p) => sum + getPAKDFinancials(p).totalAmount, 0);
+      .reduce((sum, p) => sum + p.items.reduce((s, i) => s + Number(i.total_qty) * Number(i.price), 0), 0);
 
   const getCustomerDebtStats = (customerId) => {
     return pakds
@@ -796,12 +766,11 @@ export default function App() {
         (acc, p) => {
           const fin = getPAKDFinancials(p);
           acc.total += fin.totalAmount;
-          acc.profit += fin.grossProfit;
           acc.paid += fin.paidAmount;
           acc.debt += Math.max(0, fin.remainingDebt);
           return acc;
         },
-        { total: 0, profit: 0, paid: 0, debt: 0 }
+        { total: 0, paid: 0, debt: 0 }
       );
   };
 
@@ -1273,9 +1242,9 @@ export default function App() {
           <div className="p-8 overflow-y-auto space-y-6">
             <div>
               <h2 className="text-2xl font-bold text-white">Tổng quan Vận hành</h2>
-              <p className="text-neutral-400 text-sm mt-1">Theo dõi nhanh tiến độ Phương án kinh doanh, Lợi nhuận gộp, Công nợ và Kho vận</p>
+              <p className="text-neutral-400 text-sm mt-1">Theo dõi nhanh tiến độ Phương án kinh doanh, Công nợ và Kho vận</p>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
               <div
                 className="bg-neutral-900 border border-neutral-800 p-5 rounded-xl cursor-pointer hover:border-orange-500/50 transition-colors"
                 onClick={() => setCurrentView('pakd_list')}
@@ -1291,25 +1260,6 @@ export default function App() {
                 </div>
               </div>
               <div
-                className="bg-neutral-900 border border-neutral-800 p-5 rounded-xl cursor-pointer hover:border-emerald-500/50 transition-colors"
-                onClick={() => setCurrentView('pakd_list')}
-              >
-                <p className="text-neutral-400 text-xs uppercase font-semibold flex items-center justify-between">
-                  Tổng Lợi nhuận gộp (PAKD) <TrendingUp size={14} className="text-emerald-400" />
-                </p>
-                <div className="mt-2">
-                  <p className={`text-2xl font-extrabold ${totalPAKDGrossProfit >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {totalPAKDGrossProfit.toLocaleString()} đ
-                  </p>
-                  <p className="text-xs text-neutral-400 mt-1.5">
-                    Biên lợi nhuận TB:{' '}
-                    <strong className="text-white">
-                      {totalPAKDAmount > 0 ? (Math.round((totalPAKDGrossProfit / totalPAKDAmount) * 1000) / 10) : 0}%
-                    </strong>
-                  </p>
-                </div>
-              </div>
-              <div
                 className="bg-neutral-900 border border-neutral-800 p-5 rounded-xl cursor-pointer hover:border-orange-500/50 transition-colors"
                 onClick={() => setCurrentView('debt_tracking')}
               >
@@ -1317,7 +1267,7 @@ export default function App() {
                   Công nợ phải thu <Wallet size={14} className="text-orange-400" />
                 </p>
                 <div className="mt-2">
-                  <p className="text-2xl font-extrabold text-orange-400">
+                  <p className="text-xl font-extrabold text-orange-400">
                     {totalRemainingDebtAllPAKDs.toLocaleString()} đ
                   </p>
                   <p className="text-xs text-emerald-400 mt-1.5">
@@ -1516,8 +1466,7 @@ export default function App() {
                     <th className="p-4">Số PAKD</th>
                     <th className="p-4">Khách hàng</th>
                     <SortableDateHeader label="Ngày lập" sortOrder={pakdDateSort} onToggle={setPakdDateSort} />
-                    <th className="p-4 text-right">Doanh thu (Incl.VAT)</th>
-                    <th className="p-4 text-right">Giá vốn / Lợi nhuận gộp</th>
+                    <th className="p-4 text-right">Tổng giá trị (Incl.VAT)</th>
                     <th className="p-4 text-right">Công nợ (Đã thu / Còn nợ)</th>
                     <th className="p-4 text-center">Tiến độ giao</th>
                     <th className="p-4 text-center">Thao tác</th>
@@ -1527,8 +1476,7 @@ export default function App() {
                   {sortedPAKDs.length > 0 ? (
                     sortedPAKDs.map((p) => {
                       const totQty = p.items.reduce((s, i) => s + Number(i.total_qty), 0);
-                      const { totalAmount, totalCost, grossProfit, grossMargin, paidAmount, remainingDebt } =
-                        getPAKDFinancials(p);
+                      const { totalAmount, paidAmount, remainingDebt } = getPAKDFinancials(p);
                       const doneQty = p.items.reduce((s, i) => s + getPAKDItemStats(p.id, i.sku).shipped, 0);
                       const pct = totQty > 0 ? Math.round((doneQty / totQty) * 100) : 0;
                       return (
@@ -1539,14 +1487,6 @@ export default function App() {
                           <td className="p-4 text-right font-semibold text-white">{totalAmount.toLocaleString()} đ</td>
                           <td className="p-4 text-right">
                             <div className="text-xs">
-                              <span className="text-neutral-400">Vốn: {totalCost.toLocaleString()} đ</span>
-                              <span className={`block font-bold mt-0.5 ${grossProfit >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                Lãi: {grossProfit.toLocaleString()} đ ({grossMargin}%)
-                              </span>
-                            </div>
-                          </td>
-                          <td className="p-4 text-right">
-                            <div className="text-xs">
                               <span className="text-emerald-400 font-semibold">Thu: {paidAmount.toLocaleString()} đ</span>
                               <span className={`block font-bold mt-0.5 ${remainingDebt > 0 ? 'text-orange-400' : 'text-neutral-500'}`}>
                                 {remainingDebt > 0 ? `Nợ: ${remainingDebt.toLocaleString()} đ` : 'Đã thu đủ'}
@@ -1555,7 +1495,7 @@ export default function App() {
                           </td>
                           <td className="p-4">
                             <div className="flex items-center justify-center gap-2">
-                              <div className="w-16 bg-neutral-800 rounded-full h-2">
+                              <div className="w-20 bg-neutral-800 rounded-full h-2">
                                 <div className={`h-2 rounded-full ${pct === 100 ? 'bg-emerald-500' : 'bg-orange-500'}`} style={{ width: `${pct}%` }} />
                               </div>
                               <span className="text-xs text-neutral-400 w-9">{pct}%</span>
@@ -1565,9 +1505,9 @@ export default function App() {
                             <div className="flex justify-center items-center gap-1.5">
                               <button
                                 onClick={() => { setSelectedPAKDId(p.id); setCurrentView('pakd_detail'); }}
-                                className="bg-neutral-800 hover:bg-orange-600 text-white px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors"
+                                className="bg-neutral-800 hover:bg-orange-600 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors"
                               >
-                                Mở
+                                Mở chi tiết
                               </button>
                               <button
                                 onClick={() => setPaymentModalState({ pakd: p, payment: null })}
@@ -1597,7 +1537,7 @@ export default function App() {
                     })
                   ) : (
                     <tr>
-                      <td colSpan="8" className="p-8 text-center text-neutral-500 text-sm">
+                      <td colSpan="7" className="p-8 text-center text-neutral-500 text-sm">
                         Chưa có Phương án kinh doanh nào. Bấm <strong className="text-orange-400">+ TẠO PHƯƠNG ÁN MỚI</strong> để bắt đầu.
                       </td>
                     </tr>
@@ -1608,7 +1548,7 @@ export default function App() {
           </div>
         )}
 
-        {/* --- VIEW 3B: CHI TIẾT PHƯƠNG ÁN & LỢI NHUẬN GỘP + CÔNG NỢ + SALES ORDER --- */}
+        {/* --- VIEW 3B: CHI TIẾT PHƯƠNG ÁN & TẠO SALES ORDER + CÔNG NỢ --- */}
         {currentView === 'pakd_detail' && selectedPAKD && (() => {
           const fin = getPAKDFinancials(selectedPAKD);
           const paidPct = fin.totalAmount > 0 ? Math.min(100, Math.round((fin.paidAmount / fin.totalAmount) * 100)) : 0;
@@ -1652,49 +1592,6 @@ export default function App() {
               </div>
 
               <div className="p-6 overflow-y-auto space-y-6">
-                {/* KHỐI PHÂN TÍCH GIÁ VỐN & LỢI NHUẬN GỘP PAKD */}
-                <div className="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden shadow-lg">
-                  <div className="p-4 border-b border-neutral-800 flex flex-wrap justify-between items-center gap-3 bg-black/40">
-                    <div className="flex items-center gap-2.5">
-                      <TrendingUp size={18} className="text-emerald-400" />
-                      <span className="font-bold text-white text-sm">Hiệu quả Kinh doanh — Giá vốn & Lợi nhuận gộp PAKD</span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setEditingPAKD(selectedPAKD)}
-                      className="text-xs text-amber-400 hover:underline font-medium"
-                    >
-                      Chỉnh sửa đơn giá vốn trên PAKD →
-                    </button>
-                  </div>
-                  <div className="p-4 grid grid-cols-1 md:grid-cols-4 gap-4">
-                    <div className="bg-black/60 border border-neutral-800 rounded-xl p-4">
-                      <p className="text-xs uppercase font-semibold text-neutral-400">Tổng Doanh thu (Incl.VAT)</p>
-                      <p className="text-xl font-extrabold text-white mt-1">
-                        {fin.totalAmount.toLocaleString()} <span className="text-xs font-normal text-neutral-400">đ</span>
-                      </p>
-                    </div>
-                    <div className="bg-black/60 border border-neutral-800 rounded-xl p-4">
-                      <p className="text-xs uppercase font-semibold text-neutral-400">Tổng Giá vốn (COGS)</p>
-                      <p className="text-xl font-extrabold text-neutral-300 mt-1">
-                        {fin.totalCost.toLocaleString()} <span className="text-xs font-normal text-neutral-400">đ</span>
-                      </p>
-                    </div>
-                    <div className="bg-black/60 border border-neutral-800 rounded-xl p-4">
-                      <p className="text-xs uppercase font-semibold text-neutral-400">Lợi nhuận gộp</p>
-                      <p className={`text-xl font-extrabold mt-1 ${fin.grossProfit >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                        {fin.grossProfit.toLocaleString()} <span className="text-xs font-normal text-neutral-400">đ</span>
-                      </p>
-                    </div>
-                    <div className="bg-black/60 border border-neutral-800 rounded-xl p-4">
-                      <p className="text-xs uppercase font-semibold text-neutral-400">Biên lợi nhuận gộp</p>
-                      <p className={`text-xl font-extrabold mt-1 ${fin.grossMargin >= 0 ? 'text-orange-400' : 'text-red-400'}`}>
-                        {fin.grossMargin}%
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
                 {/* KHỐI THEO DÕI CÔNG NỢ & CÁC ĐỢT THANH TOÁN */}
                 <div className="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden shadow-lg">
                   <div className="p-4 border-b border-neutral-800 flex flex-wrap justify-between items-center gap-3 bg-black/40">
@@ -1811,38 +1708,30 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* BẢNG THEO DÕI SỐ LƯỢNG CAM KẾT, LỢI NHUẬN TỪNG DÒNG & TIẾN ĐỘ GIAO HÀNG */}
+                {/* BẢNG THEO DÕI SỐ LƯỢNG CAM KẾT & TIẾN ĐỘ GIAO HÀNG */}
                 <div className="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
-                  <div className="p-4 border-b border-neutral-800 font-bold text-white text-sm">Bảng chi tiết hàng hóa, lợi nhuận gộp & tiến độ giao hàng</div>
+                  <div className="p-4 border-b border-neutral-800 font-bold text-white text-sm">Bảng theo dõi số lượng cam kết & tiến độ giao hàng</div>
                   <table className="w-full text-left border-collapse text-sm">
                     <thead>
                       <tr className="bg-black/60 border-b border-neutral-800 text-xs uppercase text-neutral-400">
                         <th className="p-3.5">Mã SKU</th>
-                        <th className="p-3.5 w-1/4">Tên hàng hóa</th>
-                        <th className="p-3.5 text-right">Đơn giá vốn</th>
-                        <th className="p-3.5 text-right">Đơn giá bán</th>
-                        <th className="p-3.5 text-right text-emerald-400">Lợi nhuận gộp</th>
-                        <th className="p-3.5 text-center">Tổng SL</th>
-                        <th className="p-3.5 text-center text-yellow-400">Chờ xuất</th>
-                        <th className="p-3.5 text-center text-emerald-400">Đã xuất</th>
-                        <th className="p-3.5 text-center text-orange-400">CÒN LẠI</th>
+                        <th className="p-3.5 w-1/3">Tên hàng hóa</th>
+                        <th className="p-3.5 text-right">Đơn giá (Incl.VAT)</th>
+                        <th className="p-3.5 text-center">Tổng cam kết</th>
+                        <th className="p-3.5 text-center text-yellow-400">Đã lên SO (Chờ xuất)</th>
+                        <th className="p-3.5 text-center text-emerald-400">Đã xuất kho</th>
+                        <th className="p-3.5 text-center text-orange-400">SL CÒN LẠI</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-neutral-800">
                       {selectedPAKD.items.map((item, idx) => {
                         const { shipped, pending } = getPAKDItemStats(selectedPAKD.id, item.sku);
                         const remaining = item.total_qty - shipped - pending;
-                        const unitCost = Number(item.cost) || 0;
-                        const lineProfit = (Number(item.price) - unitCost) * Number(item.total_qty);
                         return (
                           <tr key={idx} className="hover:bg-neutral-800/40">
                             <td className="p-3.5 font-mono font-semibold text-neutral-200">{item.sku}</td>
                             <td className="p-3.5 text-neutral-300 leading-tight">{item.name}</td>
-                            <td className="p-3.5 text-right text-neutral-400">{unitCost.toLocaleString()} đ</td>
                             <td className="p-3.5 text-right">{Number(item.price).toLocaleString()} đ</td>
-                            <td className={`p-3.5 text-right font-semibold ${lineProfit >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                              {lineProfit.toLocaleString()} đ
-                            </td>
                             <td className="p-3.5 text-center font-bold text-white">{item.total_qty}</td>
                             <td className="p-3.5 text-center text-yellow-400 font-semibold">{pending}</td>
                             <td className="p-3.5 text-center text-emerald-400 font-semibold">{shipped}</td>
@@ -2357,7 +2246,6 @@ export default function App() {
                       <th className="p-4">Khách hàng</th>
                       <th className="p-4 text-center">Số lượng PAKD</th>
                       <th className="p-4 text-right">Tổng doanh số (VNĐ)</th>
-                      <th className="p-4 text-right">Lợi nhuận gộp</th>
                       <th className="p-4 text-right">Công nợ còn lại</th>
                     </tr>
                   </thead>
@@ -2372,15 +2260,14 @@ export default function App() {
                               <td className="p-4 text-center font-bold text-neutral-500">#{index + 1}</td>
                               <td className="p-4"><span className="font-bold text-orange-400">{c.name}</span><span className="text-xs text-neutral-400 block">{c.id}</span></td>
                               <td className="p-4 text-center font-bold text-white">{c.total_pakd}</td>
-                              <td className="p-4 text-right font-bold text-white">{dStat.total.toLocaleString()} đ</td>
-                              <td className="p-4 text-right font-bold text-emerald-400">{dStat.profit.toLocaleString()} đ</td>
+                              <td className="p-4 text-right font-bold text-emerald-400">{dStat.total.toLocaleString()} đ</td>
                               <td className="p-4 text-right font-bold text-orange-400">{dStat.debt.toLocaleString()} đ</td>
                             </tr>
                           );
                         })
                     ) : (
                       <tr>
-                        <td colSpan="6" className="p-8 text-center text-neutral-500 text-sm">
+                        <td colSpan="5" className="p-8 text-center text-neutral-500 text-sm">
                           Chưa có dữ liệu doanh số khách hàng.
                         </td>
                       </tr>
@@ -2866,11 +2753,8 @@ function PAKDFormModal({ initialPAKD, customers, products, getPAKDItemStats, onC
   const [date, setDate] = useState(initialPAKD?.date || new Date().toLocaleDateString('vi-VN'));
   const [lines, setLines] = useState(
     initialPAKD?.items?.length > 0
-      ? initialPAKD.items.map((i) => ({
-          ...i,
-          cost: i.cost ?? 0,
-        }))
-      : [{ sku: '', name: '', cost: '', price: 0, total_qty: 1 }]
+      ? initialPAKD.items.map((i) => ({ ...i }))
+      : [{ sku: '', name: '', cost: 0, price: 0, total_qty: 1 }]
   );
 
   const productOptions = products.map((p) => ({
@@ -2890,36 +2774,17 @@ function PAKDFormModal({ initialPAKD, customers, products, getPAKDItemStats, onC
       ...updated[idx],
       sku,
       name: prod ? prod.name : '',
+      cost: prod ? prod.cost : 0,
       price: prod ? prod.price : 0,
-      // Không tự lấy giá vốn từ nhập kho; để người dùng tự nhập giá vốn khi lập PAKD
     };
     setLines(updated);
   };
-
-  // Tạm tính doanh thu, giá vốn & lợi nhuận gộp ngay khi đang lập PAKD
-  const draftRevenue = lines.reduce(
-    (s, l) => s + (Number(l.total_qty) || 0) * (Number(l.price) || 0),
-    0
-  );
-  const draftCost = lines.reduce(
-    (s, l) => s + (Number(l.total_qty) || 0) * (Number(l.cost) || 0),
-    0
-  );
-  const draftProfit = draftRevenue - draftCost;
-  const draftMargin = draftRevenue > 0 ? Math.round((draftProfit / draftRevenue) * 1000) / 10 : 0;
 
   const handleSubmit = () => {
     if (!code.trim() || !customerName.trim()) {
       return alert('Vui lòng nhập Số PAKD và Tên khách hàng!');
     }
-    const validLines = lines
-      .filter((l) => l.sku && Number(l.total_qty) > 0)
-      .map((l) => ({
-        ...l,
-        total_qty: Number(l.total_qty) || 0,
-        cost: Number(l.cost) || 0,
-        price: Number(l.price) || 0,
-      }));
+    const validLines = lines.filter((l) => l.sku && Number(l.total_qty) > 0);
     if (validLines.length === 0) {
       return alert('Vui lòng chọn ít nhất 1 sản phẩm có số lượng lớn hơn 0!');
     }
@@ -2956,7 +2821,7 @@ function PAKDFormModal({ initialPAKD, customers, products, getPAKDItemStats, onC
 
   return (
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
-      <div className="bg-neutral-900 border border-neutral-700 w-full max-w-6xl rounded-2xl overflow-hidden flex flex-col max-h-[90vh]">
+      <div className="bg-neutral-900 border border-neutral-700 w-full max-w-5xl rounded-2xl overflow-hidden flex flex-col max-h-[90vh]">
         <div className="p-5 bg-black border-b border-neutral-800 flex justify-between items-center shrink-0">
           <div>
             <h3 className="text-lg font-bold text-white">
@@ -3049,11 +2914,11 @@ function PAKDFormModal({ initialPAKD, customers, products, getPAKDItemStats, onC
           </div>
           <div>
             <div className="flex justify-between items-center mb-2">
-              <span className="text-xs font-bold uppercase text-neutral-400">Chi tiết hàng hóa cam kết & Giá vốn</span>
+              <span className="text-xs font-bold uppercase text-neutral-400">Chi tiết hàng hóa cam kết</span>
               <button
                 type="button"
                 onClick={() =>
-                  setLines([...lines, { sku: '', name: '', cost: '', price: 0, total_qty: 1 }])
+                  setLines([...lines, { sku: '', name: '', cost: 0, price: 0, total_qty: 1 }])
                 }
                 className="text-xs bg-neutral-800 hover:bg-neutral-700 text-orange-400 px-3 py-1.5 rounded-lg font-semibold"
               >
@@ -3071,9 +2936,9 @@ function PAKDFormModal({ initialPAKD, customers, products, getPAKDItemStats, onC
                 return (
                   <div
                     key={idx}
-                    className="grid grid-cols-12 gap-2 items-end bg-neutral-950 p-3 rounded-lg border border-neutral-800"
+                    className="grid grid-cols-12 gap-2.5 items-end bg-neutral-950 p-3 rounded-lg border border-neutral-800"
                   >
-                    <div className="col-span-5">
+                    <div className="col-span-6">
                       <div className="flex items-center justify-between mb-1">
                         <label className="text-[11px] font-semibold text-neutral-400">
                           Mã SKU / Tên hàng hóa *
@@ -3091,9 +2956,9 @@ function PAKDFormModal({ initialPAKD, customers, products, getPAKDItemStats, onC
                         placeholder="Chọn hoặc tìm kiếm mã SKU / tên sản phẩm..."
                       />
                     </div>
-                    <div className="col-span-1">
+                    <div className="col-span-2">
                       <label className="block text-[11px] font-semibold text-neutral-400 mb-1 text-center">
-                        SL *
+                        Số lượng *
                       </label>
                       <input
                         type="number"
@@ -3105,24 +2970,7 @@ function PAKDFormModal({ initialPAKD, customers, products, getPAKDItemStats, onC
                           setLines(updated);
                         }}
                         placeholder="SL"
-                        className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1.5 text-xs text-white text-center font-bold outline-none focus:border-orange-500"
-                      />
-                    </div>
-                    <div className="col-span-2">
-                      <label className="block text-[11px] font-semibold text-amber-400 mb-1 text-right">
-                        Đơn giá vốn (VND)
-                      </label>
-                      <input
-                        type="number"
-                        min="0"
-                        value={line.cost}
-                        onChange={(e) => {
-                          const updated = [...lines];
-                          updated[idx].cost = e.target.value === '' ? '' : Number(e.target.value);
-                          setLines(updated);
-                        }}
-                        placeholder="Nhập giá vốn..."
-                        className="w-full bg-neutral-900 border border-amber-500/40 rounded px-2.5 py-1.5 text-xs text-amber-300 text-right outline-none focus:border-amber-400"
+                        className="w-full bg-neutral-900 border border-neutral-700 rounded px-2.5 py-1.5 text-xs text-white text-center font-bold outline-none focus:border-orange-500"
                       />
                     </div>
                     <div className="col-span-3">
@@ -3156,24 +3004,6 @@ function PAKDFormModal({ initialPAKD, customers, products, getPAKDItemStats, onC
                   </div>
                 );
               })}
-            </div>
-
-            {/* TẠM TÍNH DOANH THU - GIÁ VỐN - LỢI NHUẬN GỘP */}
-            <div className="mt-4 bg-black/50 border border-neutral-800 rounded-xl p-3.5 grid grid-cols-3 gap-4 text-xs">
-              <div>
-                <span className="text-neutral-400 block">Tổng doanh thu (Incl.VAT)</span>
-                <strong className="text-white text-sm">{draftRevenue.toLocaleString()} đ</strong>
-              </div>
-              <div>
-                <span className="text-neutral-400 block">Tổng giá vốn PAKD</span>
-                <strong className="text-amber-300 text-sm">{draftCost.toLocaleString()} đ</strong>
-              </div>
-              <div>
-                <span className="text-neutral-400 block">Lợi nhuận gộp dự kiến</span>
-                <strong className={`text-sm ${draftProfit >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                  {draftProfit.toLocaleString()} đ ({draftMargin}%)
-                </strong>
-              </div>
             </div>
           </div>
         </div>
