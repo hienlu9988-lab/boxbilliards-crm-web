@@ -1,1 +1,18 @@
-
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="boxBilliardsGrad" x1="20%" y1="0%" x2="80%" y2="100%">
+      <stop offset="0%" stop-color="#f59e0b" />
+      <stop offset="45%" stop-color="#f97316" />
+      <stop offset="100%" stop-color="#dc2626" />
+    </linearGradient>
+  </defs>
+  
+  <circle cx="32" cy="32" r="31" fill="#09090b" />
+  
+  <g fill="none" stroke="url(#boxBilliardsGrad)" stroke-width="5.2" stroke-linecap="round" stroke-linejoin="round">
+    
+    <path d="M 21 24 V 17 C 21 12.5 25.5 10.5 29.5 12.8 L 43 20.5 C 47.5 23 47.5 29.2 43 31.8 L 28.5 40 C 24 42.5 21 40.5 21 36 V 24 Z" />
+    
+    <path d="M 21 26 C 21 21.5 24 19.5 28.5 22 L 43 30.2 C 47.5 32.8 47.5 39 43 41.5 L 29.5 49.2 C 25.5 51.5 21 49.5 21 45 V 38" />
+  </g>
+</svg>
